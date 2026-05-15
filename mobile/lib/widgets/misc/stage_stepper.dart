@@ -38,6 +38,8 @@ class StageStepper extends StatelessWidget {
     return _stages.indexWhere((s) => s.stage == currentStage);
   }
 
+  bool get _isLost => currentStage == DealStage.closedLost;
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -49,13 +51,51 @@ class StageStepper extends StatelessWidget {
       ),
       child: Column(
         children: [
+          // Lost banner — replaces the "current cell" treatment when the
+          // deal is closed-lost since the lost stage doesn't appear on the
+          // happy-path stepper. Tapping a forward cell still works (i.e.
+          // reopening the deal into prospecting/qualified/etc.).
+          if (_isLost) ...[
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 8,
+              ),
+              margin: const EdgeInsets.only(bottom: 12),
+              decoration: BoxDecoration(
+                color: AppColors.danger100,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    LucideIcons.xCircle,
+                    size: 16,
+                    color: AppColors.danger600,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Closed Lost — tap a stage to reopen',
+                      style: AppTypography.caption.copyWith(
+                        color: AppColors.danger600,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+
           // Stepper row
           Row(
             children: List.generate(_stages.length * 2 - 1, (index) {
               if (index.isOdd) {
                 // Connector line
                 final stageIndex = index ~/ 2;
-                final isCompleted = stageIndex < _currentIndex;
+                final isCompleted = !_isLost && stageIndex < _currentIndex;
 
                 return Expanded(
                   child: Container(
@@ -84,8 +124,8 @@ class StageStepper extends StatelessWidget {
               children: _stages.asMap().entries.map((entry) {
                 final index = entry.key;
                 final stage = entry.value;
-                final isCompleted = index < _currentIndex;
-                final isCurrent = index == _currentIndex;
+                final isCompleted = !_isLost && index < _currentIndex;
+                final isCurrent = !_isLost && index == _currentIndex;
 
                 return Expanded(
                   child: Text(
@@ -114,14 +154,16 @@ class StageStepper extends StatelessWidget {
 
   Widget _buildStageIndicator(int index) {
     final stage = _stages[index];
-    final isCompleted = index < _currentIndex;
-    final isCurrent = index == _currentIndex;
-    final isFuture = index > _currentIndex;
+    final isCompleted = !_isLost && index < _currentIndex;
+    final isCurrent = !_isLost && index == _currentIndex;
+
+    // Any non-current cell is tappable when onStageChange is wired up.
+    // Backward moves correct mistakes; forward moves advance the deal;
+    // any tap on a lost deal reopens it into the chosen stage.
+    final isTappable = !isCurrent && onStageChange != null;
 
     return GestureDetector(
-      onTap: isFuture && onStageChange != null
-          ? () => onStageChange!(stage.stage)
-          : null,
+      onTap: isTappable ? () => onStageChange!(stage.stage) : null,
       child: AnimatedContainer(
         duration: AppDurations.normal,
         width: 36,
@@ -132,7 +174,9 @@ class StageStepper extends StatelessWidget {
               : Colors.transparent,
           shape: BoxShape.circle,
           border: Border.all(
-            color: isFuture ? AppColors.gray300 : AppColors.primary600,
+            color: isCompleted || isCurrent
+                ? AppColors.primary600
+                : AppColors.gray300,
             width: 2,
           ),
           boxShadow: isCurrent

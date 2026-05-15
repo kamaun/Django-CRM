@@ -77,6 +77,10 @@ class ApiConfig {
   /// Opportunities (deals) management
   static String get opportunities => '$apiBaseUrl/opportunities/';
 
+  /// Opportunity comment (for update/delete)
+  static String opportunityComment(String commentId) =>
+      '$apiBaseUrl/opportunities/comment/$commentId/';
+
   /// Tasks management
   static String get tasks => '$apiBaseUrl/tasks/';
 

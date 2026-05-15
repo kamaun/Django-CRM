@@ -1,7 +1,145 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../config/api_config.dart';
+import '../data/models/attachment.dart';
+import '../data/models/comment.dart';
+import '../data/models/custom_field_definition.dart';
 import '../data/models/deal.dart';
 import '../services/api_service.dart';
+import 'leads_provider.dart' show AssignableUser;
+
+/// How the list view sorts deals within a stage. Backend doesn't expose a
+/// sort param so we apply this client-side over the loaded page.
+enum DealSort { closeDateAsc, valueDesc, stageAgeDesc, updatedDesc }
+
+extension DealSortX on DealSort {
+  String get label {
+    switch (this) {
+      case DealSort.closeDateAsc:
+        return 'Closest close date';
+      case DealSort.valueDesc:
+        return 'Largest value';
+      case DealSort.stageAgeDesc:
+        return 'Stalest first';
+      case DealSort.updatedDesc:
+        return 'Recently updated';
+    }
+  }
+}
+
+/// Filter state for the deals list. Each field maps to a backend query param.
+class DealFilters {
+  final String? search;
+  final DealStage? stage;
+  final List<String> assignedToIds;
+  final List<String> tagIds;
+  final DateTime? createdFrom;
+  final DateTime? createdTo;
+  final DateTime? closingFrom;
+  final DateTime? closingTo;
+  final double? amountMin;
+  final double? amountMax;
+  final bool rottenOnly;
+
+  const DealFilters({
+    this.search,
+    this.stage,
+    this.assignedToIds = const [],
+    this.tagIds = const [],
+    this.createdFrom,
+    this.createdTo,
+    this.closingFrom,
+    this.closingTo,
+    this.amountMin,
+    this.amountMax,
+    this.rottenOnly = false,
+  });
+
+  bool get isEmpty =>
+      (search == null || search!.isEmpty) &&
+      stage == null &&
+      assignedToIds.isEmpty &&
+      tagIds.isEmpty &&
+      createdFrom == null &&
+      createdTo == null &&
+      closingFrom == null &&
+      closingTo == null &&
+      amountMin == null &&
+      amountMax == null &&
+      !rottenOnly;
+
+  /// How many "active" filter facets to show on the filter button badge.
+  /// Search is excluded (it has its own UI affordance).
+  int get badgeCount {
+    var n = 0;
+    if (stage != null) n++;
+    if (assignedToIds.isNotEmpty) n++;
+    if (tagIds.isNotEmpty) n++;
+    if (createdFrom != null || createdTo != null) n++;
+    if (closingFrom != null || closingTo != null) n++;
+    if (amountMin != null || amountMax != null) n++;
+    if (rottenOnly) n++;
+    return n;
+  }
+
+  DealFilters copyWith({
+    Object? search = _sentinel,
+    Object? stage = _sentinel,
+    List<String>? assignedToIds,
+    List<String>? tagIds,
+    Object? createdFrom = _sentinel,
+    Object? createdTo = _sentinel,
+    Object? closingFrom = _sentinel,
+    Object? closingTo = _sentinel,
+    Object? amountMin = _sentinel,
+    Object? amountMax = _sentinel,
+    bool? rottenOnly,
+  }) {
+    return DealFilters(
+      search: identical(search, _sentinel) ? this.search : search as String?,
+      stage: identical(stage, _sentinel) ? this.stage : stage as DealStage?,
+      assignedToIds: assignedToIds ?? this.assignedToIds,
+      tagIds: tagIds ?? this.tagIds,
+      createdFrom: identical(createdFrom, _sentinel)
+          ? this.createdFrom
+          : createdFrom as DateTime?,
+      createdTo: identical(createdTo, _sentinel)
+          ? this.createdTo
+          : createdTo as DateTime?,
+      closingFrom: identical(closingFrom, _sentinel)
+          ? this.closingFrom
+          : closingFrom as DateTime?,
+      closingTo: identical(closingTo, _sentinel)
+          ? this.closingTo
+          : closingTo as DateTime?,
+      amountMin: identical(amountMin, _sentinel)
+          ? this.amountMin
+          : amountMin as double?,
+      amountMax: identical(amountMax, _sentinel)
+          ? this.amountMax
+          : amountMax as double?,
+      rottenOnly: rottenOnly ?? this.rottenOnly,
+    );
+  }
+
+  static const _sentinel = Object();
+}
+
+/// Bundle returned by [DealsNotifier.getDealDetail]. The detail endpoint
+/// returns the opportunity alongside lookups (custom-field schema,
+/// assignable users) that the detail screen needs to render and act on.
+class DealDetail {
+  final Deal deal;
+  final List<CustomFieldDefinition> customFieldDefinitions;
+  final List<AssignableUser> assignableUsers;
+  final bool commentPermission;
+
+  const DealDetail({
+    required this.deal,
+    this.customFieldDefinitions = const [],
+    this.assignableUsers = const [],
+    this.commentPermission = false,
+  });
+}
 
 /// Paginated deals snapshot — wrapped by AsyncValue for loading/error.
 class DealsListData {
@@ -39,29 +177,33 @@ class DealsNotifier extends AsyncNotifier<DealsListData> {
   final ApiService _apiService = ApiService();
   static const int _pageSize = 20;
 
+  DealFilters _filters = const DealFilters();
+  DealFilters get filters => _filters;
+
   @override
   Future<DealsListData> build() => _fetchPage(offset: 0);
 
+  /// Replace filters and refetch from offset 0. Used by the search box, the
+  /// filter sheet, and the "Assigned to me" quick chip.
+  Future<void> setFilters(DealFilters filters) async {
+    _filters = filters;
+    await refresh();
+  }
+
   /// Reload the first page (pull-to-refresh / after CRUD).
-  Future<void> refresh({String? search, String? stage}) async {
+  Future<void> refresh() async {
     state = const AsyncValue.loading();
-    state = await AsyncValue.guard(
-      () => _fetchPage(offset: 0, search: search, stage: stage),
-    );
+    state = await AsyncValue.guard(() => _fetchPage(offset: 0));
   }
 
   /// Append the next page if there's more and we're not already loading.
-  Future<void> loadMore({String? search, String? stage}) async {
+  Future<void> loadMore() async {
     final current = state.value;
     if (current == null || !current.hasMore) return;
     if (state.isLoading) return;
 
     state = await AsyncValue.guard(() async {
-      final next = await _fetchPage(
-        offset: current.currentOffset,
-        search: search,
-        stage: stage,
-      );
+      final next = await _fetchPage(offset: current.currentOffset);
       return current.copyWith(
         deals: [...current.deals, ...next.deals],
         totalCount: next.totalCount,
@@ -71,21 +213,67 @@ class DealsNotifier extends AsyncNotifier<DealsListData> {
     });
   }
 
-  Future<DealsListData> _fetchPage({
-    required int offset,
-    String? search,
-    String? stage,
-  }) async {
-    final queryParams = <String, String>{
+  /// Fetch every remaining page sequentially. Used by Kanban view, which
+  /// can't paginate naturally (horizontal scroll is already used for stage
+  /// columns), so we need the whole set in-memory to populate every column.
+  Future<void> loadAll() async {
+    while (true) {
+      final current = state.value;
+      if (current == null || !current.hasMore) return;
+      if (state.isLoading) return;
+      await loadMore();
+      final after = state.value;
+      if (after == null || after.currentOffset == current.currentOffset) {
+        return; // safety — avoid infinite loop on a backend that misreports.
+      }
+    }
+  }
+
+  Future<DealsListData> _fetchPage({required int offset}) async {
+    final queryParams = <String, dynamic>{
       'limit': _pageSize.toString(),
       'offset': offset.toString(),
     };
-    if (search != null && search.isNotEmpty) queryParams['name'] = search;
-    if (stage != null && stage.isNotEmpty) queryParams['stage'] = stage;
+    final f = _filters;
+    if (f.search != null && f.search!.isNotEmpty) {
+      queryParams['name'] = f.search!;
+    }
+    if (f.stage != null) {
+      queryParams['stage'] = f.stage!.value;
+    }
+    if (f.assignedToIds.isNotEmpty) {
+      queryParams['assigned_to'] = f.assignedToIds;
+    }
+    if (f.tagIds.isNotEmpty) {
+      queryParams['tags'] = f.tagIds;
+    }
+    if (f.createdFrom != null) {
+      queryParams['created_at__gte'] = _formatDate(f.createdFrom!);
+    }
+    if (f.createdTo != null) {
+      queryParams['created_at__lte'] = _formatDate(f.createdTo!);
+    }
+    if (f.closingFrom != null) {
+      queryParams['closed_on__gte'] = _formatDate(f.closingFrom!);
+    }
+    if (f.closingTo != null) {
+      queryParams['closed_on__lte'] = _formatDate(f.closingTo!);
+    }
+    if (f.amountMin != null) {
+      queryParams['amount__gte'] = f.amountMin!.toString();
+    }
+    if (f.amountMax != null) {
+      queryParams['amount__lte'] = f.amountMax!.toString();
+    }
+    if (f.rottenOnly) {
+      queryParams['rotten'] = 'true';
+    }
 
     final url = Uri.parse(
       ApiConfig.opportunities,
-    ).replace(queryParameters: queryParams).toString();
+    ).replace(queryParameters: queryParams.map(
+      (k, v) => MapEntry(k, v is List ? v : v.toString()),
+    )).toString();
     final response = await _apiService.get(url);
 
     if (!response.success || response.data == null) {
@@ -123,22 +311,172 @@ class DealsNotifier extends AsyncNotifier<DealsListData> {
     );
   }
 
-  /// Fetch a single deal from the API (detail/form screens).
+  String _formatDate(DateTime d) {
+    return '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+  }
+
+  /// Fetch a single deal from the API. Returns just the [Deal]; screens
+  /// that need the surrounding lookups (custom-field schema, assignable
+  /// users, comments, attachments, contacts) should call [getDealDetail].
   Future<Deal?> getDeal(String id) async {
+    final detail = await getDealDetail(id);
+    return detail?.deal;
+  }
+
+  /// Fetch a deal together with everything the detail screen needs to
+  /// render and act on it: comments, attachments, custom-field
+  /// definitions, contacts and the assignable user list. Keeps the lookups
+  /// in one place rather than scattering parallel calls across the screen.
+  Future<DealDetail?> getDealDetail(String id) async {
     try {
       final url = '${ApiConfig.opportunities}$id/';
       final response = await _apiService.get(url);
 
-      if (response.success && response.data != null) {
-        final opportunityData =
-            response.data!['opportunity_obj'] as Map<String, dynamic>?;
-        if (opportunityData != null) {
-          return Deal.fromJson(opportunityData);
-        }
+      if (!response.success || response.data == null) {
+        // ignore: avoid_print
+        print(
+          '[deals_provider] getDealDetail($id) HTTP failed: '
+          'status=${response.statusCode} message=${response.message}',
+        );
+        return null;
       }
+
+      final data = response.data!;
+      final dealData =
+          data['opportunity_obj'] as Map<String, dynamic>?;
+      if (dealData == null) {
+        // ignore: avoid_print
+        print('[deals_provider] getDealDetail($id): missing opportunity_obj');
+        return null;
+      }
+
+      // The deal itself is the only failure that should sink the whole load.
+      Deal deal = Deal.fromJson(dealData);
+
+      // Top-level comments override anything that might have been inlined
+      // on the deal — they're freshly queried.
+      try {
+        final raw = data['comments'] as List<dynamic>?;
+        if (raw != null) {
+          deal = deal.copyWith(
+            comments: raw
+                .whereType<Map<String, dynamic>>()
+                .map(Comment.fromJson)
+                .toList(),
+          );
+        }
+      } catch (e, st) {
+        // ignore: avoid_print
+        print('[deals_provider] comments parse failed: $e\n$st');
+      }
+
+      try {
+        final raw = data['attachments'] as List<dynamic>?;
+        if (raw != null) {
+          deal = deal.copyWith(
+            attachments: raw
+                .whereType<Map<String, dynamic>>()
+                .map(Attachment.fromJson)
+                .toList(),
+          );
+        }
+      } catch (e, st) {
+        // ignore: avoid_print
+        print('[deals_provider] attachments parse failed: $e\n$st');
+      }
+
+      List<CustomFieldDefinition> defs = const [];
+      try {
+        final defsData = data['custom_field_definitions'] as List<dynamic>?;
+        defs = (defsData ?? const [])
+            .whereType<Map<String, dynamic>>()
+            .map(CustomFieldDefinition.fromJson)
+            .toList();
+      } catch (e, st) {
+        // ignore: avoid_print
+        print('[deals_provider] custom_field_definitions parse failed: $e\n$st');
+      }
+
+      List<AssignableUser> users = const [];
+      try {
+        final usersData = data['users'] as List<dynamic>?;
+        users = (usersData ?? const [])
+            .whereType<Map<String, dynamic>>()
+            .map(AssignableUser.fromJson)
+            .toList();
+      } catch (e, st) {
+        // ignore: avoid_print
+        print('[deals_provider] users parse failed: $e\n$st');
+      }
+
+      return DealDetail(
+        deal: deal,
+        customFieldDefinitions: defs,
+        assignableUsers: users,
+        commentPermission: data['comment_permission'] == true,
+      );
+    } catch (e, st) {
+      // ignore: avoid_print
+      print('[deals_provider] getDealDetail($id) threw: $e\n$st');
       return null;
+    }
+  }
+
+  /// Add a comment to a deal via the POST `/<id>/` endpoint (the same
+  /// endpoint that handles attachment uploads).
+  Future<({bool success, String? error})> addComment(
+    String dealId,
+    String comment,
+  ) async {
+    try {
+      final url = '${ApiConfig.opportunities}$dealId/';
+      final response = await _apiService.post(url, {'comment': comment});
+      if (response.success) return (success: true, error: null);
+      return (
+        success: false,
+        error: response.message ?? 'Failed to add comment',
+      );
     } catch (e) {
-      return null;
+      return (success: false, error: 'Failed to add comment: ${e.toString()}');
+    }
+  }
+
+  Future<({bool success, String? error})> updateComment(
+    String commentId,
+    String comment,
+  ) async {
+    try {
+      final url = ApiConfig.opportunityComment(commentId);
+      final response = await _apiService.patch(url, {'comment': comment});
+      if (response.success) return (success: true, error: null);
+      return (
+        success: false,
+        error: response.message ?? 'Failed to update comment',
+      );
+    } catch (e) {
+      return (
+        success: false,
+        error: 'Failed to update comment: ${e.toString()}',
+      );
+    }
+  }
+
+  Future<({bool success, String? error})> deleteComment(
+    String commentId,
+  ) async {
+    try {
+      final url = ApiConfig.opportunityComment(commentId);
+      final response = await _apiService.delete(url);
+      if (response.success) return (success: true, error: null);
+      return (
+        success: false,
+        error: response.message ?? 'Failed to delete comment',
+      );
+    } catch (e) {
+      return (
+        success: false,
+        error: 'Failed to delete comment: ${e.toString()}',
+      );
     }
   }
 
@@ -310,16 +648,93 @@ final dealsByStageProvider = Provider<Map<DealStage, List<Deal>>>((ref) {
   return grouped;
 });
 
-/// Pipeline value (active deals only).
-final pipelineValueProvider = Provider<double>((ref) {
-  final deals = ref.watch(dealsListProvider);
-  return deals
-      .where((d) => !d.stage.isClosed)
-      .fold<double>(0, (sum, deal) => sum + deal.value);
-});
-
-/// Active deals count.
+/// Active deals count (loaded subset). Prefer [activeDealsTotalCountProvider]
+/// when you want the server-side count.
 final activeDealsCountProvider = Provider<int>((ref) {
   final deals = ref.watch(dealsListProvider);
   return deals.where((d) => !d.stage.isClosed).length;
 });
+
+/// Authoritative active count — derived from server `opportunities_count`
+/// minus locally-known closed deals. Best-effort when the API doesn't
+/// distinguish open/closed in its count.
+final activeDealsTotalCountProvider = Provider<int>((ref) {
+  final data = ref.watch(dealsProvider).value;
+  if (data == null) return 0;
+  // Backend `opportunities_count` is the total matching the current filters,
+  // not just the loaded page. If the filter set already pins to non-closed
+  // stages (rotten=true, or stage != closed_*), prefer that; otherwise fall
+  // back to scanning the loaded subset.
+  final loadedClosed =
+      data.deals.where((d) => d.stage.isClosed).length;
+  return (data.totalCount - loadedClosed).clamp(0, data.totalCount);
+});
+
+/// Snapshot of per-currency totals for the currently-loaded active deals.
+/// The list view summarizes pipeline by currency so mixed-currency orgs
+/// don't see nonsense like USD + EUR summed.
+class PipelineBucket {
+  final Currency currency;
+  final double totalValue;
+  final double weightedValue;
+  final int count;
+  const PipelineBucket({
+    required this.currency,
+    required this.totalValue,
+    required this.weightedValue,
+    required this.count,
+  });
+}
+
+class PipelineSummary {
+  final List<PipelineBucket> buckets;
+  final bool loadedSubset;
+  const PipelineSummary({required this.buckets, required this.loadedSubset});
+
+  /// Currency with the largest active total — used as the "primary" chip
+  /// when there are multiple currencies in play.
+  PipelineBucket? get primary {
+    if (buckets.isEmpty) return null;
+    final sorted = [...buckets]
+      ..sort((a, b) => b.totalValue.compareTo(a.totalValue));
+    return sorted.first;
+  }
+
+  bool get isMixed => buckets.length > 1;
+}
+
+final pipelineSummaryProvider = Provider<PipelineSummary>((ref) {
+  final data = ref.watch(dealsProvider).value;
+  if (data == null) {
+    return const PipelineSummary(buckets: [], loadedSubset: true);
+  }
+  final Map<Currency, _BucketAccum> acc = {};
+  for (final d in data.deals) {
+    if (d.stage.isClosed) continue;
+    final a = acc.putIfAbsent(d.currency, _BucketAccum.new);
+    a.total += d.value;
+    a.weighted += d.value * (d.probability / 100.0);
+    a.count += 1;
+  }
+  final buckets = acc.entries
+      .map(
+        (e) => PipelineBucket(
+          currency: e.key,
+          totalValue: e.value.total,
+          weightedValue: e.value.weighted,
+          count: e.value.count,
+        ),
+      )
+      .toList()
+    ..sort((a, b) => b.totalValue.compareTo(a.totalValue));
+  // We can only mark "complete" when we've loaded every page; that lets the
+  // UI add a tilde to the chip when the totals are an undercount.
+  final loadedSubset = data.hasMore;
+  return PipelineSummary(buckets: buckets, loadedSubset: loadedSubset);
+});
+
+class _BucketAccum {
+  double total = 0;
+  double weighted = 0;
+  int count = 0;
+}

@@ -452,7 +452,16 @@ class TestOpportunityDetailView:
             _detail_url(opportunity.pk), payload, format="json"
         )
         assert response.status_code == status.HTTP_200_OK
+        # Verify the comment was actually persisted AND echoed back. Without
+        # this assertion the endpoint can silently drop the write (returns
+        # 200 with stale comments) — that's exactly how the original
+        # CommentSerializer.save(opportunity_id=...) regression slipped past
+        # the test suite.
         assert "comments" in response.data
+        comments = response.data["comments"]
+        assert any(c.get("comment") == payload["comment"] for c in comments), (
+            f"new comment missing from response payload: {comments}"
+        )
 
     def test_get_detail_context_keys(self, admin_client, opportunity):
         """Detail response contains all expected context keys."""

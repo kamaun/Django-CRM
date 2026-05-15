@@ -1,9 +1,16 @@
 import 'package:flutter/material.dart';
 import '../../core/theme/app_colors.dart';
+import 'attachment.dart';
+import 'comment.dart';
 import 'lead.dart';
+import 'lookup_models.dart';
 
 /// Opportunity type enumeration
 enum OpportunityType {
+  // Sentinel — backend stores this as null (the column is blank=True,null=True).
+  // The picker shows this as "Not Specified"; toJson translates it to null so
+  // we don't auto-stamp NEW_BUSINESS on deals the user never categorized.
+  unspecified('', 'Not Specified'),
   newBusiness('NEW_BUSINESS', 'New Business'),
   existingBusiness('EXISTING_BUSINESS', 'Existing Business'),
   renewal('RENEWAL', 'Renewal'),
@@ -16,10 +23,10 @@ enum OpportunityType {
   const OpportunityType(this.value, this.label);
 
   static OpportunityType fromString(String? value) {
-    if (value == null) return OpportunityType.newBusiness;
+    if (value == null || value.isEmpty) return OpportunityType.unspecified;
     return OpportunityType.values.firstWhere(
       (e) => e.value.toLowerCase() == value.toLowerCase().replaceAll(' ', '_'),
-      orElse: () => OpportunityType.newBusiness,
+      orElse: () => OpportunityType.unspecified,
     );
   }
 }
@@ -252,6 +259,10 @@ class Deal {
   final List<DealProduct> products;
   final String assignedTo;
   final List<String> assignedToIds;
+  // Raw assigned_to profile maps from the detail endpoint (each entry has
+  // `id`, `user_details: { name, email, profile_pic }`). Used to render
+  // every assignee in the detail screen — not just the first.
+  final List<Map<String, dynamic>> assignedToRaw;
   final Priority priority;
   final List<String> labels;
   final List<String> tagIds;
@@ -262,6 +273,29 @@ class Deal {
   final Currency currency;
   final DateTime createdAt;
   final DateTime updatedAt;
+  // When the deal last changed stage. Drives the rotten / aging indicator and
+  // the "oldest first" sort. Null for legacy deals that pre-date the field.
+  final DateTime? stageChangedAt;
+  // Per-org JSONField on Opportunity. Empty map when the org defines no
+  // custom fields or when the server hasn't returned them yet.
+  final Map<String, dynamic> customFieldValues;
+  // Detail-only payload. Empty/null on list responses; populated by
+  // getDealDetail.
+  final List<Comment> comments;
+  final List<Attachment> attachments;
+  final List<ContactLookup> contactsList;
+  final List<String> teamIds;
+  final List<String> teamNames;
+  final String? createdByName;
+  final String? createdByEmail;
+  final String? closedByName;
+  final String? closedByEmail;
+  // Backend-computed aging fields (override the model-derived calculation
+  // when present — they account for per-stage aging config overrides the
+  // mobile code doesn't know about).
+  final int? daysInStageServer;
+  final String? agingStatus;
+  final double? lineItemsTotal;
 
   const Deal({
     required this.id,
@@ -276,6 +310,7 @@ class Deal {
     this.products = const [],
     required this.assignedTo,
     this.assignedToIds = const [],
+    this.assignedToRaw = const [],
     required this.priority,
     this.labels = const [],
     this.tagIds = const [],
@@ -286,6 +321,20 @@ class Deal {
     this.currency = Currency.usd,
     required this.createdAt,
     required this.updatedAt,
+    this.stageChangedAt,
+    this.customFieldValues = const {},
+    this.comments = const [],
+    this.attachments = const [],
+    this.contactsList = const [],
+    this.teamIds = const [],
+    this.teamNames = const [],
+    this.createdByName,
+    this.createdByEmail,
+    this.closedByName,
+    this.closedByEmail,
+    this.daysInStageServer,
+    this.agingStatus,
+    this.lineItemsTotal,
   });
 
   /// Factory constructor to create Deal from JSON (backend API)
@@ -305,37 +354,125 @@ class Deal {
       }
     }
 
-    // Parse assigned_to - get first person's email for display and all IDs
+    // Parse assigned_to. Two outputs:
+    //   - assignedToIds: just the profile IDs (used by writes / filters)
+    //   - assignedToRaw: the original profile maps (used by detail rendering)
+    //   - assignedToName: a single display name for the *first* assignee
+    //     (used by the list card where there's no room for more than one).
     String assignedToName = 'Unassigned';
     List<String> assignedToIds = [];
+    List<Map<String, dynamic>> assignedToRaw = [];
     if (json['assigned_to'] != null) {
       final assignedList = json['assigned_to'] as List<dynamic>? ?? [];
       for (final item in assignedList) {
         if (item is Map<String, dynamic>) {
+          assignedToRaw.add(item);
           final id = item['id']?.toString() ?? '';
           if (id.isNotEmpty) assignedToIds.add(id);
           if (assignedToName == 'Unassigned') {
-            final email =
-                item['user']?['email'] as String? ??
-                item['user__email'] as String? ??
-                '';
-            assignedToName = email.split('@').first;
+            // Prefer the detail-endpoint user_details.name; fall back to
+            // legacy fields when the response shape is the list endpoint's.
+            final userDetails = item['user_details'];
+            String name = '';
+            String email = '';
+            if (userDetails is Map<String, dynamic>) {
+              name = (userDetails['name'] as String? ?? '').trim();
+              email = (userDetails['email'] as String? ?? '').trim();
+            }
+            email = email.isNotEmpty
+                ? email
+                : (item['user']?['email'] as String? ??
+                          item['user__email'] as String? ??
+                          '')
+                      .trim();
+            if (name.isNotEmpty) {
+              assignedToName = name;
+            } else if (email.isNotEmpty) {
+              assignedToName = email.split('@').first;
+            }
             if (assignedToName.isEmpty) assignedToName = 'Assigned';
           }
         }
       }
     }
 
-    // Parse contacts - get IDs
+    // Parse contacts - both IDs (for writes) and full records (for display).
     List<String> contactIds = [];
+    List<ContactLookup> contactsList = [];
     if (json['contacts'] != null) {
-      final contactsList = json['contacts'] as List<dynamic>? ?? [];
-      for (final c in contactsList) {
+      final rawContacts = json['contacts'] as List<dynamic>? ?? [];
+      for (final c in rawContacts) {
         if (c is Map<String, dynamic>) {
           final id = c['id']?.toString() ?? '';
           if (id.isNotEmpty) contactIds.add(id);
+          try {
+            contactsList.add(ContactLookup.fromJson(c));
+          } catch (_) {
+            // Skip unparsable contact; ID list still wins.
+          }
         }
       }
+    }
+
+    // Parse teams - both IDs (for writes) and names (for display).
+    final List<String> teamIds = [];
+    final List<String> teamNames = [];
+    if (json['teams'] != null) {
+      final rawTeams = json['teams'] as List<dynamic>? ?? [];
+      for (final t in rawTeams) {
+        if (t is Map<String, dynamic>) {
+          final id = t['id']?.toString() ?? '';
+          final name = t['name'] as String? ?? '';
+          if (id.isNotEmpty) teamIds.add(id);
+          if (name.isNotEmpty) teamNames.add(name);
+        }
+      }
+    }
+
+    // created_by and closed_by — full user / profile maps.
+    String? createdByName;
+    String? createdByEmail;
+    final cb = json['created_by'];
+    if (cb is Map<String, dynamic>) {
+      createdByEmail = cb['email'] as String?;
+      final first = (cb['first_name'] as String? ?? '').trim();
+      final last = (cb['last_name'] as String? ?? '').trim();
+      final composed = [
+        first,
+        last,
+      ].where((s) => s.isNotEmpty).join(' ').trim();
+      if (composed.isNotEmpty) createdByName = composed;
+    }
+
+    String? closedByName;
+    String? closedByEmail;
+    final clb = json['closed_by'];
+    if (clb is Map<String, dynamic>) {
+      final userDetails = clb['user_details'];
+      if (userDetails is Map<String, dynamic>) {
+        closedByEmail = userDetails['email'] as String?;
+        final n = (userDetails['name'] as String? ?? '').trim();
+        if (n.isNotEmpty) closedByName = n;
+      }
+      closedByEmail ??= clb['email'] as String?;
+    }
+
+    // line_items_total — backend pre-computes; may be int, double, string,
+    // or null.
+    double? lineItemsTotal;
+    final lit = json['line_items_total'];
+    if (lit is num) {
+      lineItemsTotal = lit.toDouble();
+    } else if (lit is String) {
+      lineItemsTotal = double.tryParse(lit);
+    }
+
+    int? daysInStageServer;
+    final dis = json['days_in_stage'];
+    if (dis is num) {
+      daysInStageServer = dis.toInt();
+    } else if (dis is String) {
+      daysInStageServer = int.tryParse(dis);
     }
 
     // Parse account/company name and ID
@@ -428,6 +565,7 @@ class Deal {
       products: products,
       assignedTo: assignedToName,
       assignedToIds: assignedToIds,
+      assignedToRaw: assignedToRaw,
       priority: Priority.medium, // API doesn't have priority, default to medium
       labels: parsedTags,
       tagIds: parsedTagIds,
@@ -444,44 +582,58 @@ class Deal {
       updatedAt: json['updated_at'] != null
           ? DateTime.tryParse(json['updated_at'] as String) ?? DateTime.now()
           : DateTime.now(),
+      stageChangedAt: json['stage_changed_at'] != null
+          ? DateTime.tryParse(json['stage_changed_at'] as String)
+          : null,
+      customFieldValues: json['custom_fields'] is Map
+          ? Map<String, dynamic>.from(json['custom_fields'] as Map)
+          : const {},
+      contactsList: contactsList,
+      teamIds: teamIds,
+      teamNames: teamNames,
+      createdByName: createdByName,
+      createdByEmail: createdByEmail,
+      closedByName: closedByName,
+      closedByEmail: closedByEmail,
+      daysInStageServer: daysInStageServer,
+      agingStatus: json['aging_status'] as String?,
+      lineItemsTotal: lineItemsTotal,
     );
   }
 
-  /// Convert Deal to JSON for API requests (create/update)
+  /// Convert Deal to JSON for API requests (create/update).
+  ///
+  /// IMPORTANT: nullable fields (amount, account, closed_on, description,
+  /// opportunity_type) are emitted as explicit `null` when empty so edit-mode
+  /// clears actually persist. The backend's PUT uses a non-partial serializer,
+  /// so omitting a key leaves the old value in place — which would silently
+  /// drop the user's edit. m2m collections (contacts/tags/teams/assigned_to)
+  /// are always sent as arrays (possibly empty) because the view unconditionally
+  /// calls `.clear()` then re-adds.
   Map<String, dynamic> toJson() {
-    final Map<String, dynamic> data = {
+    return {
       'name': title,
       'stage': stage.value,
       'probability': probability,
+      'amount': value > 0 ? value.toStringAsFixed(2) : null,
+      'account': (accountId != null && accountId!.isNotEmpty)
+          ? accountId
+          : null,
+      'closed_on': closeDate != null
+          ? '${closeDate!.year}-${closeDate!.month.toString().padLeft(2, '0')}-${closeDate!.day.toString().padLeft(2, '0')}'
+          : null,
+      'description': (notes != null && notes!.isNotEmpty) ? notes : null,
+      'assigned_to': assignedToIds,
+      'contacts': contactIds,
+      'tags': tagIds,
+      'teams': teamIds,
+      'opportunity_type': opportunityType == OpportunityType.unspecified
+          ? null
+          : opportunityType.value,
+      'lead_source': leadSource.value,
+      'currency': currency.value,
+      'custom_fields': customFieldValues,
     };
-
-    if (value > 0) {
-      data['amount'] = value.toStringAsFixed(2);
-    }
-    if (accountId != null && accountId!.isNotEmpty) {
-      data['account'] = accountId;
-    }
-    if (closeDate != null) {
-      data['closed_on'] =
-          '${closeDate!.year}-${closeDate!.month.toString().padLeft(2, '0')}-${closeDate!.day.toString().padLeft(2, '0')}';
-    }
-    if (notes != null && notes!.isNotEmpty) {
-      data['description'] = notes;
-    }
-    if (assignedToIds.isNotEmpty) {
-      data['assigned_to'] = assignedToIds;
-    }
-    if (contactIds.isNotEmpty) {
-      data['contacts'] = contactIds;
-    }
-    if (tagIds.isNotEmpty) {
-      data['tags'] = tagIds;
-    }
-    data['opportunity_type'] = opportunityType.value;
-    data['lead_source'] = leadSource.value;
-    data['currency'] = currency.value;
-
-    return data;
   }
 
   /// Get weighted value based on probability
@@ -519,6 +671,7 @@ class Deal {
     List<DealProduct>? products,
     String? assignedTo,
     List<String>? assignedToIds,
+    List<Map<String, dynamic>>? assignedToRaw,
     Priority? priority,
     List<String>? labels,
     List<String>? tagIds,
@@ -529,6 +682,20 @@ class Deal {
     Currency? currency,
     DateTime? createdAt,
     DateTime? updatedAt,
+    DateTime? stageChangedAt,
+    Map<String, dynamic>? customFieldValues,
+    List<Comment>? comments,
+    List<Attachment>? attachments,
+    List<ContactLookup>? contactsList,
+    List<String>? teamIds,
+    List<String>? teamNames,
+    String? createdByName,
+    String? createdByEmail,
+    String? closedByName,
+    String? closedByEmail,
+    int? daysInStageServer,
+    String? agingStatus,
+    double? lineItemsTotal,
   }) {
     return Deal(
       id: id ?? this.id,
@@ -543,6 +710,7 @@ class Deal {
       products: products ?? this.products,
       assignedTo: assignedTo ?? this.assignedTo,
       assignedToIds: assignedToIds ?? this.assignedToIds,
+      assignedToRaw: assignedToRaw ?? this.assignedToRaw,
       priority: priority ?? this.priority,
       labels: labels ?? this.labels,
       tagIds: tagIds ?? this.tagIds,
@@ -553,7 +721,65 @@ class Deal {
       currency: currency ?? this.currency,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
+      stageChangedAt: stageChangedAt ?? this.stageChangedAt,
+      customFieldValues: customFieldValues ?? this.customFieldValues,
+      comments: comments ?? this.comments,
+      attachments: attachments ?? this.attachments,
+      contactsList: contactsList ?? this.contactsList,
+      teamIds: teamIds ?? this.teamIds,
+      teamNames: teamNames ?? this.teamNames,
+      createdByName: createdByName ?? this.createdByName,
+      createdByEmail: createdByEmail ?? this.createdByEmail,
+      closedByName: closedByName ?? this.closedByName,
+      closedByEmail: closedByEmail ?? this.closedByEmail,
+      daysInStageServer: daysInStageServer ?? this.daysInStageServer,
+      agingStatus: agingStatus ?? this.agingStatus,
+      lineItemsTotal: lineItemsTotal ?? this.lineItemsTotal,
     );
+  }
+
+  /// Days since the deal last changed stage (used by the aging UI). Returns
+  /// null when the field is missing (legacy deals). Closed stages count from
+  /// the close date so a long-closed deal doesn't show stale.
+  int? get daysInCurrentStage {
+    final ref = stageChangedAt;
+    if (ref == null) return null;
+    return DateTime.now().difference(ref).inDays;
+  }
+
+  /// Expected dwell time per stage; mirrors backend DEFAULT_STAGE_EXPECTED_DAYS
+  /// in opportunity/workflow.py. Returning null means "no aging budget" (e.g.
+  /// closed stages).
+  static int? defaultExpectedDays(DealStage stage) {
+    switch (stage) {
+      case DealStage.prospecting:
+        return 14;
+      case DealStage.qualified:
+        return 14;
+      case DealStage.proposal:
+        return 10;
+      case DealStage.negotiation:
+        return 10;
+      case DealStage.closedWon:
+      case DealStage.closedLost:
+        return null;
+    }
+  }
+
+  /// "rotten" tracks the backend's red threshold: days >= expected_days * 1.5.
+  bool get isRotten {
+    final days = daysInCurrentStage;
+    final expected = defaultExpectedDays(stage);
+    if (days == null || expected == null) return false;
+    return days >= (expected * 1.5).round();
+  }
+
+  /// Soft warning: between expected and the rotten threshold.
+  bool get isAging {
+    final days = daysInCurrentStage;
+    final expected = defaultExpectedDays(stage);
+    if (days == null || expected == null) return false;
+    return days >= expected && !isRotten;
   }
 
   @override

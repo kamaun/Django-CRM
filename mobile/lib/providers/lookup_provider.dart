@@ -111,6 +111,38 @@ final usersLookupProvider =
       UsersLookupNotifier.new,
     );
 
+/// Teams. Backed by the same teams_and_users endpoint as the users lookup, so
+/// hitting it twice in one frame still only fires one network request (the
+/// underlying ApiService doesn't dedupe — these notifiers each call it once and
+/// cache).
+class TeamsLookupNotifier extends AsyncNotifier<List<TeamLookup>> {
+  @override
+  Future<List<TeamLookup>> build() => _fetch();
+
+  Future<void> refresh() async {
+    state = const AsyncValue.loading();
+    state = await AsyncValue.guard(_fetch);
+  }
+
+  Future<List<TeamLookup>> _fetch() async {
+    final response = await _apiService.get(ApiConfig.teamsAndUsers);
+    if (!response.success || response.data == null) {
+      throw Exception(response.message ?? 'Failed to load teams');
+    }
+    final teams = response.data!['teams'] as List<dynamic>? ?? [];
+    return teams
+        .whereType<Map<String, dynamic>>()
+        .map(TeamLookup.fromJson)
+        .where((t) => t.id.isNotEmpty && t.name.isNotEmpty)
+        .toList();
+  }
+}
+
+final teamsLookupProvider =
+    AsyncNotifierProvider<TeamsLookupNotifier, List<TeamLookup>>(
+      TeamsLookupNotifier.new,
+    );
+
 /// Tags
 class TagsLookupNotifier extends AsyncNotifier<List<TagLookup>> {
   @override
@@ -163,6 +195,10 @@ final tagsProvider = Provider<List<TagLookup>>((ref) {
   return ref.watch(tagsLookupProvider).value ?? const [];
 });
 
+final teamsProvider = Provider<List<TeamLookup>>((ref) {
+  return ref.watch(teamsLookupProvider).value ?? const [];
+});
+
 /// Custom field definitions, keyed by target_model (Case, Lead, ...).
 ///
 /// Each form watches the family for its entity; results are cached per-target
@@ -172,12 +208,14 @@ final customFieldDefinitionsProvider =
       ref,
       targetModel,
     ) async {
-      final url = Uri.parse(ApiConfig.customFieldDefinitions).replace(
-        queryParameters: {
-          'target_model': targetModel,
-          'active_only': 'true',
-        },
-      ).toString();
+      final url = Uri.parse(ApiConfig.customFieldDefinitions)
+          .replace(
+            queryParameters: {
+              'target_model': targetModel,
+              'active_only': 'true',
+            },
+          )
+          .toString();
       final response = await _apiService.get(url);
       if (!response.success || response.data == null) {
         throw Exception(response.message ?? 'Failed to load custom fields');

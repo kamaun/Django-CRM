@@ -1,30 +1,49 @@
 import 'package:flutter/material.dart';
+import 'package:lucide_icons/lucide_icons.dart';
 import '../../core/theme/theme.dart';
 import '../../data/models/models.dart';
 import '../cards/deal_card.dart';
 
 /// Kanban Column Widget
-/// Displays a pipeline stage column with draggable deal cards
+/// Displays a pipeline stage column with draggable deal cards.
 class KanbanColumn extends StatelessWidget {
   final DealStage stage;
   final List<Deal> deals;
   final Function(Deal) onDealTap;
+  final Function(Deal)? onDealLongPress;
   final Function(Deal, DealStage)? onDealMoved;
   final double width;
-  final String currencySymbol;
+  final Set<String> selectedIds;
 
   const KanbanColumn({
     super.key,
     required this.stage,
     required this.deals,
     required this.onDealTap,
+    this.onDealLongPress,
     this.onDealMoved,
     this.width = 300,
-    this.currencySymbol = '\$',
+    this.selectedIds = const {},
   });
 
-  double get totalValue {
-    return deals.fold<double>(0, (sum, deal) => sum + deal.value);
+  /// Picks the currency that holds the largest total within this column so the
+  /// header total isn't apples-to-oranges when an org keeps deals in multiple
+  /// currencies.
+  ({Currency currency, double total, bool mixed}) _dominantBucket() {
+    if (deals.isEmpty) {
+      return (currency: Currency.usd, total: 0, mixed: false);
+    }
+    final Map<Currency, double> totals = {};
+    for (final deal in deals) {
+      totals[deal.currency] = (totals[deal.currency] ?? 0) + deal.value;
+    }
+    final entries = totals.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+    return (
+      currency: entries.first.key,
+      total: entries.first.value,
+      mixed: entries.length > 1,
+    );
   }
 
   @override
@@ -38,10 +57,7 @@ class KanbanColumn extends StatelessWidget {
       ),
       child: Column(
         children: [
-          // Column Header
           _buildHeader(),
-
-          // Deals List (Droppable)
           Expanded(
             child: DragTarget<Deal>(
               onWillAcceptWithDetails: (details) {
@@ -57,25 +73,26 @@ class KanbanColumn extends StatelessWidget {
                   duration: AppDurations.fast,
                   decoration: BoxDecoration(
                     color: isHighlighted
-                        ? _getStageColor().withValues(alpha: 0.1)
+                        ? stage.color.withValues(alpha: 0.1)
                         : Colors.transparent,
                     borderRadius: const BorderRadius.vertical(
                       bottom: Radius.circular(16),
                     ),
                     border: isHighlighted
                         ? Border.all(
-                            color: _getStageColor().withValues(alpha: 0.5),
+                            color: stage.color.withValues(alpha: 0.5),
                             width: 2,
                           )
                         : null,
                   ),
                   child: deals.isEmpty
-                      ? _buildEmptyState()
+                      ? _buildEmptyState(isHighlighted)
                       : ListView.builder(
                           padding: const EdgeInsets.all(12),
                           itemCount: deals.length,
                           itemBuilder: (context, index) {
                             final deal = deals[index];
+                            final selected = selectedIds.contains(deal.id);
                             return LongPressDraggable<Deal>(
                               data: deal,
                               feedback: Material(
@@ -86,21 +103,23 @@ class KanbanColumn extends StatelessWidget {
                                   child: DealCard(
                                     deal: deal,
                                     isDragging: true,
-                                    currencySymbol: currencySymbol,
                                   ),
                                 ),
                               ),
                               childWhenDragging: Opacity(
                                 opacity: 0.3,
-                                child: DealCard(
-                                  deal: deal,
-                                  currencySymbol: currencySymbol,
-                                ),
+                                child: DealCard(deal: deal),
                               ),
+                              onDragStarted: selected
+                                  ? null
+                                  : () => onDealLongPress?.call(deal),
                               child: DealCard(
                                 deal: deal,
                                 onTap: () => onDealTap(deal),
-                                currencySymbol: currencySymbol,
+                                onLongPress: onDealLongPress == null
+                                    ? null
+                                    : () => onDealLongPress!.call(deal),
+                                isSelected: selected,
                               ),
                             );
                           },
@@ -115,6 +134,7 @@ class KanbanColumn extends StatelessWidget {
   }
 
   Widget _buildHeader() {
+    final bucket = _dominantBucket();
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
@@ -125,19 +145,15 @@ class KanbanColumn extends StatelessWidget {
         children: [
           Row(
             children: [
-              // Color dot
               Container(
                 width: 10,
                 height: 10,
                 decoration: BoxDecoration(
-                  color: _getStageColor(),
+                  color: stage.color,
                   shape: BoxShape.circle,
                 ),
               ),
-
               const SizedBox(width: 8),
-
-              // Stage name
               Expanded(
                 child: Text(
                   stage.displayName,
@@ -146,8 +162,6 @@ class KanbanColumn extends StatelessWidget {
                   ),
                 ),
               ),
-
-              // Count badge
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
                 decoration: BoxDecoration(
@@ -164,34 +178,54 @@ class KanbanColumn extends StatelessWidget {
               ),
             ],
           ),
-
           const SizedBox(height: 4),
-
-          // Total value
-          Text(
-            _formatCurrency(totalValue),
-            style: AppTypography.caption.copyWith(
-              color: AppColors.textSecondary,
-            ),
+          Row(
+            children: [
+              Text(
+                _formatCurrency(bucket.total, bucket.currency),
+                style: AppTypography.caption.copyWith(
+                  color: AppColors.textSecondary,
+                ),
+              ),
+              if (bucket.mixed) ...[
+                const SizedBox(width: 4),
+                Text(
+                  '+ mixed',
+                  style: AppTypography.caption.copyWith(
+                    color: AppColors.textTertiary,
+                    fontStyle: FontStyle.italic,
+                  ),
+                ),
+              ],
+            ],
           ),
         ],
       ),
     );
   }
 
-  Widget _buildEmptyState() {
+  Widget _buildEmptyState(bool highlighted) {
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(24),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.inbox_outlined, size: 32, color: AppColors.gray300),
+            Icon(
+              highlighted ? LucideIcons.arrowDownCircle : LucideIcons.inbox,
+              size: 32,
+              color: highlighted ? stage.color : AppColors.gray300,
+            ),
             const SizedBox(height: 8),
             Text(
-              'No deals',
+              highlighted
+                  ? 'Drop to move to ${stage.displayName}'
+                  : 'No deals in ${stage.displayName}',
+              textAlign: TextAlign.center,
               style: AppTypography.caption.copyWith(
-                color: AppColors.textTertiary,
+                color: highlighted ? stage.color : AppColors.textTertiary,
+                fontWeight:
+                    highlighted ? FontWeight.w600 : FontWeight.normal,
               ),
             ),
           ],
@@ -200,30 +234,14 @@ class KanbanColumn extends StatelessWidget {
     );
   }
 
-  Color _getStageColor() {
-    switch (stage) {
-      case DealStage.prospecting:
-        return AppColors.gray400;
-      case DealStage.qualified:
-        return AppColors.primary500;
-      case DealStage.proposal:
-        return AppColors.purple500;
-      case DealStage.negotiation:
-        return AppColors.warning500;
-      case DealStage.closedWon:
-        return AppColors.success500;
-      case DealStage.closedLost:
-        return AppColors.danger500;
-    }
-  }
-
-  String _formatCurrency(double value) {
+  String _formatCurrency(double value, Currency currency) {
+    final symbol = currency.symbol;
     if (value >= 1000000) {
-      return '$currencySymbol${(value / 1000000).toStringAsFixed(1)}M';
+      return '$symbol${(value / 1000000).toStringAsFixed(1)}M';
     } else if (value >= 1000) {
-      return '$currencySymbol${(value / 1000).toStringAsFixed(0)}K';
+      return '$symbol${(value / 1000).toStringAsFixed(0)}K';
     } else {
-      return '$currencySymbol${value.toStringAsFixed(0)}';
+      return '$symbol${value.toStringAsFixed(0)}';
     }
   }
 }

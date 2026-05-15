@@ -291,7 +291,9 @@ final appRouterProvider = Provider<GoRouter>((ref) {
                     path: 'create',
                     name: 'dealCreate',
                     parentNavigatorKey: _rootNavigatorKey,
-                    builder: (context, state) => const DealFormScreen(),
+                    builder: (context, state) => DealFormScreen(
+                      accountId: state.uri.queryParameters['accountId'],
+                    ),
                   ),
                   GoRoute(
                     path: ':id',

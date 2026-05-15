@@ -1,24 +1,27 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons/lucide_icons.dart';
 import '../../core/theme/theme.dart';
 import '../../data/models/models.dart';
-import '../../data/mock/mock_data.dart';
+import '../../providers/lookup_provider.dart';
 import '../common/common.dart';
 
 /// Deal Card Widget
 /// Displays deal summary in Kanban columns or list view
-class DealCard extends StatelessWidget {
+class DealCard extends ConsumerWidget {
   final Deal deal;
   final VoidCallback? onTap;
+  final VoidCallback? onLongPress;
   final bool isDragging;
-  final String currencySymbol;
+  final bool isSelected;
 
   const DealCard({
     super.key,
     required this.deal,
     this.onTap,
+    this.onLongPress,
     this.isDragging = false,
-    this.currencySymbol = '\$',
+    this.isSelected = false,
   });
 
   int get daysUntilClose {
@@ -43,11 +46,27 @@ class DealCard extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) {
-    final assignedUser = MockData.getUserById(deal.assignedTo);
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Real assignee lookup — match the first profile id from the deal against
+    // the loaded users list. Falls back to the email-derived display name on
+    // the Deal so we still render something when the lookup hasn't resolved.
+    final users = ref.watch(usersProvider);
+    UserLookup? assignee;
+    if (deal.assignedToIds.isNotEmpty) {
+      final firstId = deal.assignedToIds.first;
+      for (final u in users) {
+        if (u.id == firstId) {
+          assignee = u;
+          break;
+        }
+      }
+    }
+    final assigneeLabel = assignee?.displayName ??
+        (deal.assignedTo == 'Unassigned' ? null : deal.assignedTo);
 
     return GestureDetector(
       onTap: onTap,
+      onLongPress: onLongPress,
       child: AnimatedContainer(
         duration: AppDurations.fast,
         margin: const EdgeInsets.only(bottom: 12),
@@ -55,12 +74,16 @@ class DealCard extends StatelessWidget {
           color: AppColors.surface,
           borderRadius: AppLayout.borderRadiusLg,
           boxShadow: isDragging ? AppLayout.shadowMd : AppLayout.shadowSm,
+          border: isSelected
+              ? Border.all(color: AppColors.primary500, width: 2)
+              : null,
         ),
         child: Material(
           color: Colors.transparent,
           borderRadius: AppLayout.borderRadiusLg,
           child: InkWell(
             onTap: onTap,
+            onLongPress: onLongPress,
             borderRadius: AppLayout.borderRadiusLg,
             child: Opacity(
               opacity: isDragging ? 0.8 : 1.0,
@@ -69,10 +92,18 @@ class DealCard extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Row 1: Title + Priority
+                    // Row 1: Title + Priority + Selection check
                     Row(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        if (isSelected) ...[
+                          Icon(
+                            LucideIcons.checkCircle2,
+                            size: 18,
+                            color: AppColors.primary600,
+                          ),
+                          const SizedBox(width: 6),
+                        ],
                         Expanded(
                           child: Text(
                             deal.title,
@@ -83,7 +114,9 @@ class DealCard extends StatelessWidget {
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                        if (deal.priority == Priority.high) ...[
+                        // Priority badge shows for every priority that isn't
+                        // the default Medium — Low/High/Urgent all visible.
+                        if (deal.priority != Priority.medium) ...[
                           const SizedBox(width: 8),
                           PriorityBadge.fromPriority(deal.priority),
                         ],
@@ -101,6 +134,16 @@ class DealCard extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
+
+                    // Row 2b: Aging / rotten pill
+                    if (deal.isRotten || deal.isAging) ...[
+                      const SizedBox(height: 6),
+                      _AgingPill(
+                        days: deal.daysInCurrentStage ?? 0,
+                        stageName: deal.stage.displayName,
+                        isRotten: deal.isRotten,
+                      ),
+                    ],
 
                     // Row 3: Labels
                     if (deal.labels.isNotEmpty) ...[
@@ -183,10 +226,10 @@ class DealCard extends StatelessWidget {
                           ),
                         ),
                         const SizedBox(width: 12),
-                        if (assignedUser != null)
+                        if (assigneeLabel != null)
                           UserAvatar(
-                            name: assignedUser.name,
-                            imageUrl: assignedUser.avatar,
+                            name: assigneeLabel,
+                            imageUrl: assignee?.profilePic,
                             size: AvatarSize.xs,
                           ),
                       ],
@@ -235,12 +278,13 @@ class DealCard extends StatelessWidget {
   }
 
   String _formatCurrency(double value) {
+    final symbol = deal.currency.symbol;
     if (value >= 1000000) {
-      return '$currencySymbol${(value / 1000000).toStringAsFixed(1)}M';
+      return '$symbol${(value / 1000000).toStringAsFixed(1)}M';
     } else if (value >= 1000) {
-      return '$currencySymbol${(value / 1000).toStringAsFixed(0)}K';
+      return '$symbol${(value / 1000).toStringAsFixed(0)}K';
     } else {
-      return '$currencySymbol${value.toStringAsFixed(0)}';
+      return '$symbol${value.toStringAsFixed(0)}';
     }
   }
 
@@ -252,17 +296,62 @@ class DealCard extends StatelessWidget {
   }
 }
 
+/// Small pill rendered on cards whose stage_changed_at exceeds the expected
+/// dwell window. Red when rotten (1.5×), amber when merely aging.
+class _AgingPill extends StatelessWidget {
+  final int days;
+  final String stageName;
+  final bool isRotten;
+
+  const _AgingPill({
+    required this.days,
+    required this.stageName,
+    required this.isRotten,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final color = isRotten ? AppColors.danger600 : AppColors.warning700;
+    final bg = isRotten ? AppColors.danger50 : AppColors.warning50;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withValues(alpha: 0.3)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            isRotten ? LucideIcons.alertOctagon : LucideIcons.clock,
+            size: 11,
+            color: color,
+          ),
+          const SizedBox(width: 4),
+          Text(
+            isRotten ? 'Stale $days d' : 'Aging $days d',
+            style: AppTypography.caption.copyWith(
+              color: color,
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// Compact deal card for horizontal lists
 class DealCardCompact extends StatelessWidget {
   final Deal deal;
   final VoidCallback? onTap;
-  final String currencySymbol;
 
   const DealCardCompact({
     super.key,
     required this.deal,
     this.onTap,
-    this.currencySymbol = '\$',
   });
 
   @override
@@ -286,7 +375,7 @@ class DealCardCompact extends StatelessWidget {
                   width: 8,
                   height: 8,
                   decoration: BoxDecoration(
-                    color: _getStageColor(deal.stage),
+                    color: deal.stage.color,
                     shape: BoxShape.circle,
                   ),
                 ),
@@ -315,7 +404,7 @@ class DealCardCompact extends StatelessWidget {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Text(
-                  '$currencySymbol${(deal.value / 1000).toStringAsFixed(0)}K',
+                  '${deal.currency.symbol}${(deal.value / 1000).toStringAsFixed(0)}K',
                   style: AppTypography.label.copyWith(
                     color: AppColors.primary600,
                     fontWeight: FontWeight.w600,
@@ -335,20 +424,4 @@ class DealCardCompact extends StatelessWidget {
     );
   }
 
-  Color _getStageColor(DealStage stage) {
-    switch (stage) {
-      case DealStage.prospecting:
-        return AppColors.gray400;
-      case DealStage.qualified:
-        return AppColors.primary500;
-      case DealStage.proposal:
-        return AppColors.purple500;
-      case DealStage.negotiation:
-        return AppColors.warning500;
-      case DealStage.closedWon:
-        return AppColors.success500;
-      case DealStage.closedLost:
-        return AppColors.danger500;
-    }
-  }
 }

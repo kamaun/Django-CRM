@@ -678,7 +678,6 @@ class OpportunityDetailView(APIView):
                 {"error": True, "errors": "User company doesnot match with header...."},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        comment_serializer = CommentSerializer(data=params)
         if self.request.profile.role != "ADMIN" and not self.request.user.is_superuser:
             if not (
                 (self.request.profile == self.opportunity_obj.created_by)
@@ -691,23 +690,34 @@ class OpportunityDetailView(APIView):
                     },
                     status=status.HTTP_403_FORBIDDEN,
                 )
-        if comment_serializer.is_valid():
-            if params.get("comment"):
-                comment_serializer.save(
-                    opportunity_id=self.opportunity_obj.id,
-                    commented_by_id=self.request.profile.id,
-                )
 
-            if self.request.FILES.get("opportunity_attachment"):
-                attachment = Attachments()
-                attachment.created_by = self.request.profile.user
-                attachment.file_name = self.request.FILES.get(
-                    "opportunity_attachment"
-                ).name
-                attachment.content_object = self.opportunity_obj
-                attachment.attachment = self.request.FILES.get("opportunity_attachment")
-                attachment.org = self.request.profile.org
-                attachment.save()
+        # Create the comment directly via the generic Comment ORM path — the
+        # previous code routed through CommentSerializer.save(opportunity_id=...,
+        # commented_by_id=...) but CommentSerializer requires `object_id` and
+        # `org` on input which the client never supplies, so is_valid() always
+        # returned False and the comment was silently dropped (HTTP 200 with
+        # no error). Matches the lead/case create patterns.
+        comment_text = (params.get("comment") or "").strip()
+        if comment_text:
+            opportunity_content_type = ContentType.objects.get_for_model(Opportunity)
+            Comment.objects.create(
+                content_type=opportunity_content_type,
+                object_id=self.opportunity_obj.id,
+                comment=comment_text,
+                commented_by=self.request.profile,
+                org=self.request.profile.org,
+            )
+
+        if self.request.FILES.get("opportunity_attachment"):
+            attachment = Attachments()
+            attachment.created_by = self.request.profile.user
+            attachment.file_name = self.request.FILES.get(
+                "opportunity_attachment"
+            ).name
+            attachment.content_object = self.opportunity_obj
+            attachment.attachment = self.request.FILES.get("opportunity_attachment")
+            attachment.org = self.request.profile.org
+            attachment.save()
 
         opportunity_content_type = ContentType.objects.get_for_model(Opportunity)
         comments = Comment.objects.filter(

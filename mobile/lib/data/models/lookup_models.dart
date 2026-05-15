@@ -135,6 +135,31 @@ class UserLookup {
   int get hashCode => id.hashCode;
 }
 
+/// Team model for selector
+class TeamLookup {
+  final String id;
+  final String name;
+  final String? description;
+
+  const TeamLookup({required this.id, required this.name, this.description});
+
+  factory TeamLookup.fromJson(Map<String, dynamic> json) {
+    return TeamLookup(
+      id: json['id']?.toString() ?? '',
+      name: json['name'] as String? ?? '',
+      description: json['description'] as String?,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TeamLookup && runtimeType == other.runtimeType && id == other.id;
+
+  @override
+  int get hashCode => id.hashCode;
+}
+
 /// Tag model for selector
 class TagLookup {
   final String id;
