@@ -7,6 +7,7 @@
   import {
     Plus,
     Eye,
+    Upload,
     User,
     Mail,
     Phone,
@@ -23,6 +24,7 @@
   import { CrmDrawer } from '$lib/components/ui/crm-drawer';
   import { CustomFieldsPanel } from '$lib/components/custom-fields';
   import { CommentSection } from '$lib/components/ui/comment-section';
+  import ContactImportDrawer from '$lib/components/contacts/ContactImportDrawer.svelte';
   import { getCurrentUser } from '$lib/api.js';
   import { Button } from '$lib/components/ui/button/index.js';
   import * as DropdownMenu from '$lib/components/ui/dropdown-menu/index.js';
@@ -98,6 +100,9 @@
   let loadedTags = $state(/** @type {any[]} */ ([]));
   let dropdownOptionsLoaded = $state(false);
   let dropdownOptionsLoading = $state(false);
+
+  // CSV bulk-import drawer
+  let importOpen = $state(false);
 
   // Account from URL param (for quick action from account page)
   let accountFromUrl = $state(false);
@@ -793,6 +798,10 @@
         {/each}
       </DropdownMenu.Content>
     </DropdownMenu.Root>
+    <Button variant="outline" size="sm" class="gap-2" onclick={() => (importOpen = true)}>
+      <Upload class="h-4 w-4" />
+      Import CSV
+    </Button>
     <Button onclick={openCreate}>
       <Plus class="mr-2 h-4 w-4" />
       New Contact
@@ -1024,3 +1033,5 @@
 >
   <input type="hidden" name="contactId" value={formState.contactId} />
 </form>
+
+<ContactImportDrawer bind:open={importOpen} />
