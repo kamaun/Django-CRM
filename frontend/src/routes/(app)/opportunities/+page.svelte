@@ -25,7 +25,9 @@
     Trash2,
     Receipt,
     Clock,
-    ArrowUpRight
+    ArrowUpRight,
+    List as ListIcon,
+    LayoutGrid
   } from '@lucide/svelte';
   import { PageHeader, FilterStrip, ViewTabs, FilterPill } from '$lib/components/layout';
   import { Button } from '$lib/components/ui/button/index.js';
@@ -34,6 +36,7 @@
   import { CommentSection } from '$lib/components/ui/comment-section';
   import { getCurrentUser } from '$lib/api.js';
   import { CrmTable } from '$lib/components/ui/crm-table';
+  import { OpportunityKanban } from '$lib/components/ui/opportunity-kanban';
   import {
     SearchInput,
     SelectFilter,
@@ -491,6 +494,16 @@
 
   // Column visibility state - use defaults (excludes probability and type)
   let visibleColumns = $state([...DEFAULT_VISIBLE_COLUMNS]);
+
+  // View mode (list | kanban) — synced with ?view= URL param via server data.
+  /** @type {'list' | 'kanban'} */
+  let viewMode = $state('list');
+  $effect(() => {
+    if (data.viewMode) viewMode = data.viewMode;
+  });
+  // Kanban payload from the server load; null while it's fetching or the
+  // load failed (the kanban component shows its own loading/empty state).
+  const kanbanData = $derived(data.kanbanData);
 
   // Drawer state
   let drawerOpen = $state(false);
@@ -966,6 +979,63 @@
     openCreate();
   }
 
+  /**
+   * Switch between list and kanban views; persisted in the URL so a refresh
+   * reopens the same view and the server load knows whether to fetch the
+   * kanban payload.
+   * @param {'list' | 'kanban'} mode
+   */
+  async function updateViewMode(mode) {
+    viewMode = mode;
+    const url = new URL($page.url);
+    if (mode === 'list') {
+      url.searchParams.delete('view');
+    } else {
+      url.searchParams.set('view', mode);
+    }
+    await goto(url.toString(), { replaceState: true, noScroll: true, invalidateAll: true });
+  }
+
+  /**
+   * Drag-drop callback from the kanban board. Hits the backend move
+   * endpoint via the moveOpportunity server action; KanbanBoard handles its
+   * own optimistic update + rollback on failure.
+   * @param {string} opportunityId
+   * @param {string} newStage
+   * @param {string} _columnId
+   * @param {string | null} aboveId
+   * @param {string | null} belowId
+   */
+  async function handleKanbanStageChange(opportunityId, newStage, _columnId, aboveId, belowId) {
+    const form = new FormData();
+    form.append('opportunityId', opportunityId);
+    form.append('stage', newStage);
+    if (aboveId) form.append('aboveId', aboveId);
+    if (belowId) form.append('belowId', belowId);
+
+    const response = await fetch('?/moveOpportunity', { method: 'POST', body: form });
+    const result = await response.json();
+
+    if (result.type === 'failure' || result.data?.error) {
+      // Throw so KanbanBoard can roll back its optimistic move.
+      throw new Error(result.data?.message || 'Failed to move opportunity');
+    }
+    await invalidateAll();
+  }
+
+  /** Open the existing drawer when a kanban card is clicked. */
+  function handleKanbanCardClick(opp) {
+    openDrawer(opp.id);
+  }
+
+  /** "Add a card" footer in a kanban column: pre-fill stage from columnId. */
+  function handleKanbanAddItem(columnId) {
+    openCreate();
+    // Stage default is "PROSPECTING" in the empty template; override now that
+    // we know which column the user clicked.
+    drawerFormData = { ...drawerFormData, stage: columnId };
+  }
+
   // Get selected row data
   const selectedRow = $derived(
     filteredOpportunities.find((/** @type {any} */ r) => r.id === selectedRowId)
@@ -1217,38 +1287,68 @@
 
       <div class="bg-border mx-1 h-6 w-px"></div>
 
-      <!-- Column Visibility Dropdown -->
-      <DropdownMenu.Root>
-        <DropdownMenu.Trigger asChild>
-          {#snippet child({ props })}
-            <Button {...props} variant="outline" size="sm" class="gap-2">
-              <Eye class="h-4 w-4" />
-              Columns
-              {#if visibleColumns.length < columns.length}
-                <span
-                  class="rounded-full bg-[var(--color-primary-light)] px-1.5 py-0.5 text-xs font-medium text-[var(--color-primary-default)]"
-                >
-                  {visibleColumns.length}/{columns.length}
-                </span>
-              {/if}
-            </Button>
-          {/snippet}
-        </DropdownMenu.Trigger>
-        <DropdownMenu.Content align="end" class="w-48">
-          <DropdownMenu.Label>Toggle columns</DropdownMenu.Label>
-          <DropdownMenu.Separator />
-          {#each columns as column (column.key)}
-            <DropdownMenu.CheckboxItem
-              class=""
-              checked={visibleColumns.includes(column.key)}
-              onCheckedChange={() => toggleColumn(column.key)}
-              disabled={column.canHide === false}
-            >
-              {column.label}
-            </DropdownMenu.CheckboxItem>
-          {/each}
-        </DropdownMenu.Content>
-      </DropdownMenu.Root>
+      <!-- View mode toggle (list vs kanban) -->
+      <div class="inline-flex rounded-md border border-[var(--border-default)] p-0.5">
+        <button
+          type="button"
+          onclick={() => updateViewMode('list')}
+          class="inline-flex items-center gap-1.5 rounded px-2 py-1 text-sm font-medium transition-colors {viewMode ===
+          'list'
+            ? 'bg-[var(--color-primary-default)] text-white'
+            : 'text-[var(--text-secondary)] hover:bg-[var(--surface-sunken)]'}"
+          title="List view"
+        >
+          <ListIcon class="h-4 w-4" />
+          List
+        </button>
+        <button
+          type="button"
+          onclick={() => updateViewMode('kanban')}
+          class="inline-flex items-center gap-1.5 rounded px-2 py-1 text-sm font-medium transition-colors {viewMode ===
+          'kanban'
+            ? 'bg-[var(--color-primary-default)] text-white'
+            : 'text-[var(--text-secondary)] hover:bg-[var(--surface-sunken)]'}"
+          title="Kanban view"
+        >
+          <LayoutGrid class="h-4 w-4" />
+          Kanban
+        </button>
+      </div>
+
+      <!-- Column Visibility Dropdown (list view only) -->
+      {#if viewMode === 'list'}
+        <DropdownMenu.Root>
+          <DropdownMenu.Trigger asChild>
+            {#snippet child({ props })}
+              <Button {...props} variant="outline" size="sm" class="gap-2">
+                <Eye class="h-4 w-4" />
+                Columns
+                {#if visibleColumns.length < columns.length}
+                  <span
+                    class="rounded-full bg-[var(--color-primary-light)] px-1.5 py-0.5 text-xs font-medium text-[var(--color-primary-default)]"
+                  >
+                    {visibleColumns.length}/{columns.length}
+                  </span>
+                {/if}
+              </Button>
+            {/snippet}
+          </DropdownMenu.Trigger>
+          <DropdownMenu.Content align="end" class="w-48">
+            <DropdownMenu.Label>Toggle columns</DropdownMenu.Label>
+            <DropdownMenu.Separator />
+            {#each columns as column (column.key)}
+              <DropdownMenu.CheckboxItem
+                class=""
+                checked={visibleColumns.includes(column.key)}
+                onCheckedChange={() => toggleColumn(column.key)}
+                disabled={column.canHide === false}
+              >
+                {column.label}
+              </DropdownMenu.CheckboxItem>
+            {/each}
+          </DropdownMenu.Content>
+        </DropdownMenu.Root>
+      {/if}
 
       <Button onclick={addNewRow} disabled={isLoading}>
         <Plus class="mr-2 h-4 w-4" />
@@ -1295,8 +1395,18 @@
       <span>{filteredOpportunities.length} of {pagination.total} opportunities</span>
     {/snippet}
   </FilterStrip>
-  <!-- Table View -->
-  {#if filteredOpportunities.length === 0}
+  {#if viewMode === 'kanban'}
+    <!-- Kanban View — rendered directly (no wrapper) so the shared KanbanBoard
+         can claim its h-full of the parent flex-1 container, matching the
+         pattern used on the tasks page. -->
+    <OpportunityKanban
+      data={kanbanData}
+      loading={!kanbanData}
+      onStageChange={handleKanbanStageChange}
+      onCardClick={handleKanbanCardClick}
+      onAddItem={handleKanbanAddItem}
+    />
+  {:else if filteredOpportunities.length === 0}
     <div class="flex flex-col items-center justify-center py-16 text-center">
       <div
         class="mb-4 flex size-16 items-center justify-center rounded-[var(--radius-xl)] bg-[var(--surface-sunken)]"
@@ -1330,14 +1440,16 @@
     </CrmTable>
   {/if}
 
-  <!-- Pagination -->
-  <Pagination
-    page={pagination.page}
-    limit={pagination.limit}
-    total={pagination.total}
-    onPageChange={handlePageChange}
-    onLimitChange={handleLimitChange}
-  />
+  <!-- Pagination (list view only — kanban shows the full pipeline) -->
+  {#if viewMode === 'list'}
+    <Pagination
+      page={pagination.page}
+      limit={pagination.limit}
+      total={pagination.total}
+      onPageChange={handlePageChange}
+      onLimitChange={handleLimitChange}
+    />
+  {/if}
 </div>
 
 </div>

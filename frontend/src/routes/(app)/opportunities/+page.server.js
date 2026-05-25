@@ -26,6 +26,9 @@ export async function load({ locals, cookies, url }) {
     throw error(401, 'Organization context required');
   }
 
+  // Parse view mode (list | kanban)
+  const viewMode = url.searchParams.get('view') || 'list';
+
   // Parse pagination params from URL
   const page = parseInt(url.searchParams.get('page') || '1');
   const limit = parseInt(url.searchParams.get('limit') || '10');
@@ -64,9 +67,30 @@ export async function load({ locals, cookies, url }) {
 
     const queryString = queryParams.toString();
 
+    // Build kanban-only query params (kanban view ignores pagination + the
+    // status-chip filters that the list uses, since stage IS the column axis).
+    const kanbanParams = new URLSearchParams();
+    if (filters.search) kanbanParams.append('search', filters.search);
+    if (filters.account) kanbanParams.append('account', filters.account);
+    filters.assigned_to.forEach((id) => kanbanParams.append('assigned_to', id));
+    filters.tags.forEach((id) => kanbanParams.append('tags', id));
+    if (filters.closed_on_gte) kanbanParams.append('closed_on__gte', filters.closed_on_gte);
+    if (filters.closed_on_lte) kanbanParams.append('closed_on__lte', filters.closed_on_lte);
+    const kanbanQueryString = kanbanParams.toString();
+
     // Fetch opportunities, teams/users, and products from Django API in parallel
-    const [response, teamsUsersResponse, productsResponse] = await Promise.all([
+    const [response, kanbanResponse, teamsUsersResponse, productsResponse] = await Promise.all([
       apiRequest(`/opportunities/${queryString ? `?${queryString}` : ''}`, {}, { cookies, org }),
+      viewMode === 'kanban'
+        ? apiRequest(
+            `/opportunities/kanban/${kanbanQueryString ? '?' + kanbanQueryString : ''}`,
+            {},
+            { cookies, org }
+          ).catch((err) => {
+            console.error('Failed to fetch opportunities kanban:', err);
+            return null;
+          })
+        : Promise.resolve(null),
       apiRequest('/users/get-teams-and-users/', {}, { cookies, org }).catch((err) => {
         console.error('Failed to fetch teams/users:', err);
         return { teams: [], profiles: [] };
@@ -256,7 +280,9 @@ export async function load({ locals, cookies, url }) {
         teams,
         products
       },
-      filters
+      filters,
+      viewMode,
+      kanbanData: kanbanResponse
     };
   } catch (err) {
     console.error('Error loading opportunities from API:', err);
@@ -400,6 +426,37 @@ export const actions = {
     } catch (err) {
       console.error('Error updating opportunity:', err);
       return fail(500, { message: `Failed to update opportunity: ${err.message}` });
+    }
+  },
+
+  moveOpportunity: async ({ request, locals, cookies }) => {
+    try {
+      const formData = await request.formData();
+      const opportunityId = formData.get('opportunityId')?.toString();
+      const stage = formData.get('stage')?.toString();
+      const aboveId = formData.get('aboveId')?.toString() || null;
+      const belowId = formData.get('belowId')?.toString() || null;
+      const org = locals.org;
+
+      if (!opportunityId || !stage || !org) {
+        return fail(400, { message: 'Missing required data' });
+      }
+
+      /** @type {Record<string, string>} */
+      const moveData = { stage };
+      if (aboveId) moveData.above_id = aboveId;
+      if (belowId) moveData.below_id = belowId;
+
+      await apiRequest(
+        `/opportunities/${opportunityId}/move/`,
+        { method: 'PATCH', body: moveData },
+        { cookies, org }
+      );
+
+      return { success: true };
+    } catch (err) {
+      console.error('Error moving opportunity:', err);
+      return fail(500, { message: `Failed to move opportunity: ${err.message}` });
     }
   },
 

@@ -102,6 +102,9 @@
     return value.toFixed(0);
   }
 
+  /** @type {HTMLElement | null} */
+  let draggedSourceEl = null;
+
   /**
    * @param {DragEvent} e
    * @param {any} item
@@ -110,12 +113,39 @@
   function handleDragStart(e, item, columnId) {
     draggedItem = item;
     dragSourceColumn = columnId;
+    if (!e.dataTransfer) return;
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', item.id);
+
+    const cardEl = /** @type {HTMLElement | null} */ (
+      e.currentTarget instanceof HTMLElement ? e.currentTarget : null
+    );
+    if (!cardEl) return;
+
+    // Build a crisp, tilted clone for the drag image — the browser default
+    // mirrors the source element AFTER our style changes apply, which makes
+    // the ghost look washed out. An explicit clone keeps it sharp and tactile.
+    const rect = cardEl.getBoundingClientRect();
+    const clone = /** @type {HTMLElement} */ (cardEl.cloneNode(true));
+    clone.style.position = 'fixed';
+    clone.style.top = '-10000px';
+    clone.style.left = '-10000px';
+    clone.style.width = `${rect.width}px`;
+    clone.style.transform = 'rotate(3deg)';
+    clone.style.boxShadow = '0 12px 28px rgba(9, 30, 66, 0.25)';
+    clone.style.opacity = '1';
+    clone.style.pointerEvents = 'none';
+    clone.style.zIndex = '9999';
+    document.body.appendChild(clone);
+    e.dataTransfer.setDragImage(clone, e.clientX - rect.left, e.clientY - rect.top);
+    // The browser only needs the node for the next paint; tidy up after.
+    setTimeout(() => clone.remove(), 0);
+
+    // Mark the source as a placeholder slot so the column visibly shows
+    // where the card came from.
+    draggedSourceEl = cardEl;
     requestAnimationFrame(() => {
-      if (e.target instanceof HTMLElement) {
-        e.target.style.opacity = '0.5';
-      }
+      cardEl.classList.add('kanban-card-source');
     });
   }
 
@@ -210,8 +240,11 @@
 
   /** @param {DragEvent} [e] */
   function handleDragEnd(e) {
-    if (e?.target instanceof HTMLElement) {
-      e.target.style.opacity = '1';
+    if (draggedSourceEl) {
+      draggedSourceEl.classList.remove('kanban-card-source');
+      draggedSourceEl = null;
+    } else if (e?.target instanceof HTMLElement) {
+      e.target.classList.remove('kanban-card-source');
     }
     draggedItem = null;
     dragSourceColumn = null;
@@ -431,6 +464,14 @@
   }
   :global(.dark) .columns-container::-webkit-scrollbar-thumb:hover {
     background: rgba(255, 255, 255, 0.2);
+  }
+
+  :global(.kanban-card-source) {
+    opacity: 0.35 !important;
+    filter: grayscale(0.4);
+    outline: 2px dashed rgba(34, 211, 238, 0.7);
+    outline-offset: -2px;
+    border-radius: 0.5rem;
   }
 
   .skeleton {

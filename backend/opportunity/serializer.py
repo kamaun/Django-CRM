@@ -256,6 +256,81 @@ class OpportunityCreateSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
+# ============================================================================
+# Kanban Serializers
+# ============================================================================
+
+
+class _MinimalAccountField(serializers.RelatedField):
+    """Account FK rendered as `{id, name}` so kanban cards can show the parent
+    without the heavyweight AccountSerializer (which pulls in addresses, tags,
+    contacts, etc. — wasted bytes on a kanban card)."""
+
+    def to_representation(self, value):
+        return {"id": str(value.pk), "name": getattr(value, "name", "") or ""}
+
+
+class OpportunityKanbanCardSerializer(serializers.ModelSerializer):
+    """Lightweight payload for kanban cards — only what the card UI renders."""
+
+    account = _MinimalAccountField(read_only=True)
+    assigned_to = ProfileSerializer(read_only=True, many=True)
+    days_in_stage = serializers.SerializerMethodField()
+    aging_status = serializers.SerializerMethodField()
+    # The shared KanbanBoard reads `opportunity_amount` to drive its pipeline
+    # stats bar and per-column totals; aliasing `amount` lets the board light
+    # those up without a frontend transform layer.
+    opportunity_amount = serializers.DecimalField(
+        source="amount", max_digits=12, decimal_places=2, allow_null=True, read_only=True
+    )
+
+    class Meta:
+        model = Opportunity
+        fields = (
+            "id",
+            "name",
+            "stage",
+            "amount",
+            "opportunity_amount",
+            "currency",
+            "probability",
+            "closed_on",
+            "kanban_order",
+            "account",
+            "assigned_to",
+            "days_in_stage",
+            "aging_status",
+            "created_at",
+        )
+
+    @extend_schema_field(int)
+    def get_days_in_stage(self, obj):
+        return obj.days_in_current_stage
+
+    @extend_schema_field(str)
+    def get_aging_status(self, obj):
+        # Aging configs are passed via context to avoid N+1 lookups; falls back
+        # to per-row DB query if the caller didn't prefetch (single-row case).
+        aging_configs = self.context.get("aging_configs")
+        return obj.get_aging_status(aging_configs=aging_configs)
+
+
+class OpportunityMoveSerializer(serializers.Serializer):
+    """Payload for PATCH /opportunities/<pk>/move/.
+
+    `stage` is required (status-based kanban only — Opportunity has no
+    Pipeline/Stage model yet). `above_id`/`below_id` are neighbor hints used to
+    compute the fractional kanban_order; explicit `kanban_order` wins if sent.
+    """
+
+    stage = serializers.ChoiceField(choices=Opportunity._meta.get_field("stage").choices)
+    kanban_order = serializers.DecimalField(
+        max_digits=15, decimal_places=6, required=False
+    )
+    above_id = serializers.UUIDField(required=False, allow_null=True)
+    below_id = serializers.UUIDField(required=False, allow_null=True)
+
+
 class OpportunityCreateSwaggerSerializer(serializers.ModelSerializer):
     closed_on = serializers.DateField()
 

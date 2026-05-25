@@ -114,6 +114,17 @@ class Opportunity(AssignableMixin, BaseModel):
         _("Stage Changed At"), null=True, blank=True
     )
 
+    # Kanban positioning within a stage column (fractional indexing — same
+    # convention as Task.kanban_order: large stride between rows lets drag-drop
+    # insert by averaging neighbors without needing to renumber the column).
+    kanban_order = models.DecimalField(
+        _("Kanban Order"),
+        max_digits=15,
+        decimal_places=6,
+        default=0,
+        help_text="Order within the kanban column for drag-drop positioning",
+    )
+
     # System Fields
     is_active = models.BooleanField(default=True)
     org = models.ForeignKey(
@@ -130,6 +141,7 @@ class Opportunity(AssignableMixin, BaseModel):
         indexes = [
             models.Index(fields=["stage"]),
             models.Index(fields=["org", "-created_at"]),
+            models.Index(fields=["stage", "kanban_order"], name="opp_stage_kanban_idx"),
         ]
         constraints = [
             # Probability must be 0-100
